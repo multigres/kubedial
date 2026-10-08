@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubedial-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: kubedial-e2e
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args:
+            - netexec
+            - --http-port=8080
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: kubedial-e2e
+spec:
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg
+  namespace: kubedial-e2e
+spec:
+  clusterIP: None
+  selector:
+    app: pg
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg
+  namespace: kubedial-e2e
+spec:
+  serviceName: pg
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pg
+  template:
+    metadata:
+      labels:
+        app: pg
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_PASSWORD
+              value: e2e
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+            initialDelaySeconds: 5
+            periodSeconds: 2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc
+  namespace: kubedial-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grpc
+  template:
+    metadata:
+      labels:
+        app: grpc
+    spec:
+      containers:
+        - name: grpc
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args:
+            - grpc-health-checking
+            - --port=5000
+          ports:
+            - name: grpc
+              containerPort: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc
+  namespace: kubedial-e2e
+spec:
+  selector:
+    app: grpc
+  ports:
+    - name: grpc
+      port: 5000
+      targetPort: 5000

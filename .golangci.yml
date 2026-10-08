@@ -1,0 +1,75 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Never ignore an error: a swallowed error here becomes a cluster that
+    # looks fine and is not. See CLAUDE.md.
+    - errcheck
+    - errorlint
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - durationcheck
+    - gocritic
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - revive
+    - rowserrcheck
+    - unconvert
+    - usestdlibvars
+    - wrapcheck
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+    wrapcheck:
+      # Only wrap at genuine boundaries: errors crossing in from client-go.
+      # kubedial is one codebase, and demanding a %w wrap at every internal
+      # call produces "resolve: resolve: resolve:". Note that overriding
+      # ignore-sigs would drop wrapcheck's defaults (errors.New, fmt.Errorf,
+      # ...), so it is deliberately left alone.
+      ignore-package-globs:
+        - github.com/multigres/kubedial/*
+      # The package contract is that a cancellation is reported as its ctx.Err()
+      # unwrapped: a caller branches on errors.Is(err, context.Canceled), and
+      # wrapcheck's only remedy for a bare `return ctx.Err()` is the wrap that
+      # contract forbids, so this is a rule that does not apply here rather than
+      # a false positive to work around per call site. ignore-sig-regexps is a
+      # separate key from ignore-sigs and is additive, so unlike the note above
+      # it does not drop any defaults.
+      ignore-sig-regexps:
+        - \(context\.Context\)\.Err
+        # Implementing an interface means returning its errors as they are:
+        # io.Writer's callers branch on io.ErrShortWrite and os.ErrClosed, and a
+        # ctx-aware io.Reader that wrapped its delegate's error would turn the
+        # end of a file into a failure.
+        - \(io\.Writer\)\.Write
+        - \(io\.Reader\)\.Read
+
+  exclusions:
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Test helpers legitimately ignore errors on cleanup paths.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - wrapcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/multigres/kubedial
