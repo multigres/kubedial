@@ -3,6 +3,8 @@ package kubedial
 import (
 	"errors"
 	"fmt"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 var (
@@ -35,6 +37,14 @@ var (
 	// closed reports it too, so a dial through a closed Dialer fails with
 	// ErrStopped even though no listener is involved.
 	ErrStopped = errors.New("kubedial: listener stopped")
+
+	// ErrUnauthorized reports that the API server rejected the Dialer's
+	// credential with a 401, on a lookup or on a port-forward upgrade. It is
+	// how a caller holding a long-lived Dialer tells an expired credential from
+	// any other failure; the package documentation's credential lifetime
+	// section says what to do about it. A 403 is an RBAC refusal, not an
+	// expired credential, and does not match.
+	ErrUnauthorized = errors.New("kubedial: unauthorized")
 )
 
 // ForwardError carries the message the kubelet wrote on a port-forward's error
@@ -48,4 +58,25 @@ type ForwardError struct {
 
 func (e *ForwardError) Error() string {
 	return fmt.Sprintf("kubedial: forward to %s/%s:%d: %s", e.Namespace, e.Pod, e.Port, e.Msg)
+}
+
+// unauthorizedError marks err as a 401 for errors.Is(err, ErrUnauthorized)
+// while keeping err's text and chain intact, so a caller that already matches
+// on the API error (apierrors.IsUnauthorized) or logs the message sees no
+// change.
+type unauthorizedError struct{ err error }
+
+func (e *unauthorizedError) Error() string { return e.err.Error() }
+
+func (e *unauthorizedError) Unwrap() error { return e.err }
+
+func (e *unauthorizedError) Is(target error) bool { return target == ErrUnauthorized }
+
+// classifyAPIError marks an API error that is a 401 as ErrUnauthorized and
+// returns any other error unchanged.
+func classifyAPIError(err error) error {
+	if err != nil && apierrors.IsUnauthorized(err) {
+		return &unauthorizedError{err: err}
+	}
+	return err
 }

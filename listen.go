@@ -563,6 +563,12 @@ func closeBoth(a, b net.Conn) {
 func readyProbe(ctx context.Context, dial func(context.Context) (net.Conn, error), timeout time.Duration) error {
 	conn, err := dial(ctx)
 	if err != nil {
+		if errors.Is(err, ErrUnauthorized) {
+			// An expired credential is the one dial failure a long-lived caller
+			// acts on, by rebuilding its Dialer, so it stays reachable beside
+			// ErrNotReady. Its chain carries no context error to leak.
+			return fmt.Errorf("kubedial: ready check: %w: %w", err, ErrNotReady)
+		}
 		//nolint:errorlint // the dial failure is rendered, not chained: ErrNotReady is the sentinel callers branch on.
 		return fmt.Errorf("kubedial: ready check: %v: %w", err, ErrNotReady)
 	}

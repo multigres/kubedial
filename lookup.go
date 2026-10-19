@@ -86,7 +86,7 @@ func lookupService(ctx context.Context, c clients, p parsedAddr, defaultNS strin
 			// Service, so the refusal stays an error.
 			return nil, false, nil
 		default:
-			return nil, false, fmt.Errorf("kubedial: get service %s/%s: %w", ns, p.Service, err)
+			return nil, false, fmt.Errorf("kubedial: get service %s/%s: %w", ns, p.Service, classifyAPIError(err))
 		}
 	}
 	if svc.Spec.Type == corev1.ServiceTypeExternalName {
@@ -156,7 +156,7 @@ func lookupPodIP(ctx context.Context, c clients, p parsedAddr, defaultNS string)
 		pods, err = c.Pods(defaultNS).List(ctx, opts)
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("kubedial: list pods with IP %s: %w", p.Host, err)
+		return nil, false, fmt.Errorf("kubedial: list pods with IP %s: %w", p.Host, classifyAPIError(err))
 	}
 
 	candidates := usablePods(pods.Items)
@@ -187,7 +187,7 @@ func ResolveService(ctx context.Context, svcs ServiceGetter, slices EndpointSlic
 		return Endpoint{}, fmt.Errorf("kubedial: service %s/%s: %w", namespace, name, ErrNotFound)
 	}
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("kubedial: get service %s/%s: %w", namespace, name, err)
+		return Endpoint{}, fmt.Errorf("kubedial: get service %s/%s: %w", namespace, name, classifyAPIError(err))
 	}
 	if svc.Spec.Type == corev1.ServiceTypeExternalName {
 		return Endpoint{}, fmt.Errorf("kubedial: service %s/%s: %w", namespace, name, ErrUnsupportedService)
@@ -217,7 +217,7 @@ func ResolveService(ctx context.Context, svcs ServiceGetter, slices EndpointSlic
 func ResolvePod(ctx context.Context, pods PodLister, namespace, selector string, port int32) (Endpoint, error) {
 	list, err := pods.List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("kubedial: list pods matching %q in %s: %w", selector, namespace, err)
+		return Endpoint{}, fmt.Errorf("kubedial: list pods matching %q in %s: %w", selector, namespace, classifyAPIError(err))
 	}
 	if len(list.Items) == 0 {
 		return Endpoint{}, fmt.Errorf("kubedial: no pod matching %q in %s: %w", selector, namespace, ErrNotFound)
@@ -243,7 +243,7 @@ func serviceSlices(ctx context.Context, slices EndpointSliceLister, namespace, s
 		LabelSelector: "kubernetes.io/service-name=" + svc,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("kubedial: list endpointslices for service %s/%s: %w", namespace, svc, err)
+		return nil, fmt.Errorf("kubedial: list endpointslices for service %s/%s: %w", namespace, svc, classifyAPIError(err))
 	}
 	return list.Items, nil
 }

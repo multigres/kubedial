@@ -11,6 +11,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	//nolint:staticcheck // client-go's spdy.Upgrader is still declared on this package's Connection, so implementing it needs the name.
+	apihttpstream "k8s.io/apimachinery/pkg/util/httpstream"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
@@ -482,7 +484,7 @@ func newRESTStreamDialerFactory(cfg *rest.Config, core corev1client.CoreV1Interf
 			SubResource("portforward").
 			URL()
 
-		spdyDialer := spdy.NewDialerForStreaming(upgrader, &http.Client{Transport: wrapped}, http.MethodPost, url)
+		spdyDialer := spdy.NewDialerForStreaming(unauthorizedUpgrader{next: upgrader}, &http.Client{Transport: wrapped}, http.MethodPost, url)
 
 		// The websocket dialer never reads rest.Config.Dial: client-go builds a
 		// gorilla dialer and reaches the network through the request context,
@@ -498,8 +500,32 @@ func newRESTStreamDialerFactory(cfg *rest.Config, core corev1client.CoreV1Interf
 			return nil, fmt.Errorf("build websocket dialer: %w", err)
 		}
 
+		// A 401 needs no classifying on the websocket side: client-go reports
+		// any non-101 handshake there as an UpgradeFailureError, which falls
+		// back to SPDY, so the error a caller sees for a 401 is always the
+		// SPDY dialer's.
 		return portforward.NewFallbackDialerForStreaming(wsDialer, spdyDialer, func(err error) bool {
 			return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
 		}), nil
 	}, nil
+}
+
+// unauthorizedUpgrader marks a 401 on the SPDY upgrade as ErrUnauthorized.
+// SpdyRoundTripper.NewConnection renders every non-101 response into a plain
+// string error that drops the status code, so the response it is handed is
+// the last place a 401 can be told apart from any other refusal.
+type unauthorizedUpgrader struct {
+	next spdy.Upgrader
+}
+
+func (u unauthorizedUpgrader) NewConnection(resp *http.Response) (apihttpstream.Connection, error) {
+	conn, err := u.next.NewConnection(resp)
+	if err != nil {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, &unauthorizedError{err: err}
+		}
+		//nolint:wrapcheck // an Upgrader returns its delegate's error as is; Negotiate is the boundary that reports it.
+		return nil, err
+	}
+	return conn, nil
 }
