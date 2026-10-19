@@ -67,6 +67,16 @@ func WithEstablishTimeout(d time.Duration) Option {
 	return func(c *config) { c.establishTimeout = d }
 }
 
+// WithPodIdle sets how long a pod's port-forward connection stays open with no
+// streams on it before it is closed. The default is 2m. A longer value lets a
+// caller with long gaps between dials reuse the connection rather than pay a
+// fresh upgrade each time, at the cost of holding an idle connection open on
+// the API server for that long. A non-positive value is not rejected here; New
+// reports it.
+func WithPodIdle(d time.Duration) Option {
+	return func(c *config) { c.podIdle = d }
+}
+
 // withClients replaces the cluster clients a Dialer resolves through. Test-only.
 func withClients(c clients) Option {
 	return func(cfg *config) { cfg.clients = c }

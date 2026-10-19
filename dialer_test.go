@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -166,16 +167,58 @@ func TestNewRejectsBadOptions(t *testing.T) {
 		{"zero establish timeout", WithEstablishTimeout(0)},
 		{"negative establish timeout", WithEstablishTimeout(-time.Second)},
 		{"unknown mode", WithMode(Mode(99))},
+		{"zero pod idle", WithPodIdle(0)},
+		{"negative pod idle", WithPodIdle(-time.Second)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// The probe is injected so that, if validate ever moved after the
-			// mode decision, this test would not read the filesystem or env.
-			if _, err := New(nil, withInClusterProbe(func() bool { return false }), tc.opt); err == nil {
+			// mode decision, this test would not read the filesystem or env. It
+			// settles to direct mode, where a nil config is valid, so the error
+			// can only come from the option under test.
+			if _, err := New(nil, withInClusterProbe(func() bool { return true }), tc.opt); err == nil {
 				t.Fatalf("New with %s = nil error, want an error", tc.name)
 			}
 		})
 	}
+}
+
+// TestNewWithPodIdleBoundsPooledConnection checks WithPodIdle reaches the pool:
+// a pooled connection outlives the 2m default and closes only once the
+// configured idle has passed with no stream on it.
+func TestNewWithPodIdleBoundsPooledConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const idle = 10 * time.Minute
+		f := newFakeTransport()
+		d, err := New(&rest.Config{Host: "https://example.invalid"},
+			WithMode(ModeForward),
+			WithPodIdle(idle),
+			withClients(webServiceClients("10.1.0.1")),
+			withStreamDialerFactory(f.factory),
+		)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		defer d.Close()
+
+		conn, err := d.DialContext(t.Context(), "tcp", "web.ns.svc:80")
+		if err != nil {
+			t.Fatalf("DialContext: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		pooled := f.connAt(0)
+
+		time.Sleep(defaultConfig().podIdle + time.Second)
+		if pooled.isClosed() {
+			t.Fatal("connection closed at the default idle, want it held for the configured idle")
+		}
+		time.Sleep(idle - defaultConfig().podIdle)
+		if !pooled.isClosed() {
+			t.Error("connection not closed after the configured idle with no streams")
+		}
+	})
 }
 
 func TestDialerDirectNeverResolves(t *testing.T) {

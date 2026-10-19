@@ -425,6 +425,9 @@ func (c config) validate() error {
 	if c.establishTimeout <= 0 {
 		return fmt.Errorf("kubedial: establish timeout must be positive, got %s", c.establishTimeout)
 	}
+	if c.podIdle <= 0 {
+		return fmt.Errorf("kubedial: pod idle must be positive, got %s", c.podIdle)
+	}
 	switch c.mode {
 	case ModeAuto, ModeDirect, ModeForward:
 	default:
