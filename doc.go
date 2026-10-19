@@ -22,4 +22,23 @@
 // The package holds no global state, does not read configuration of its own,
 // and prints nothing. Callers observe what happened through returned errors and
 // the hooks they set.
+//
+// # Credential lifetime
+//
+// New builds the lookup clients and the port-forward transport once, from the
+// rest.Config it is given, and never rebuilds them. A Dialer built on a static
+// credential, such as a rest.Config BearerToken (an EKS token lasts 15
+// minutes), keeps the forwards it already has open once that credential
+// expires, but fails every new pod connection and every lookup. A Dialer that
+// outlives its credential needs a rest.Config whose auth is applied per
+// request: an ExecProvider, a BearerTokenFile, or a WrapTransport that sets the
+// credential itself. client-go ignores an ExecProvider when a BearerToken is
+// also set.
+//
+// A rejected credential is reported as ErrUnauthorized, through every entry
+// point, so a caller holding a cached Dialer can tell it from any other
+// failure. With a static credential it means the Dialer must be closed and
+// rebuilt from a fresh rest.Config. With an ExecProvider, client-go refreshes
+// the credential after the rejection that revealed it, so the next call can
+// succeed on the same Dialer.
 package kubedial

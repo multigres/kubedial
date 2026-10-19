@@ -31,6 +31,30 @@ as `my-svc` resolve in. Without it, bare names resolve in `default`: a
 that wants that namespace must read it from its own kubeconfig loading (for
 example `clientcmd.ClientConfig.Namespace`) and pass it to `WithNamespace`.
 
+`New` builds the lookup clients and the port-forward transport once, from
+`restCfg`, and never rebuilds them. With a static `BearerToken` in `restCfg` (an
+EKS token lasts 15 minutes), forwards that are already open keep working after
+the token expires, but every new pod connection and every lookup fails. A
+`Dialer` that outlives its credential needs a `rest.Config` whose auth is applied
+per request:
+
+- an `ExecProvider`, which is what `clientcmd` builds for a kubeconfig `exec`
+  user such as `aws eks get-token`. client-go ignores it when `BearerToken` is
+  also set.
+- a `BearerTokenFile`, which client-go re-reads every minute.
+- a `WrapTransport` that sets the credential on each request itself.
+
+A rejected credential (HTTP 401, on a lookup or on the port-forward upgrade)
+matches `errors.Is(err, kubedial.ErrUnauthorized)` through every entry point; a
+403 does not, because it is an RBAC refusal rather than an expired credential.
+With a static credential, close the `Dialer` and build a new one from a fresh
+`rest.Config`. With an `ExecProvider`, client-go refreshes the credential after
+the 401 that revealed it, so the next call can succeed on the same `Dialer`.
+
+A pod's port-forward connection closes after two minutes with no streams on it.
+A caller with longer gaps between dials can raise that with `WithPodIdle`, at the
+cost of an idle connection held open on the API server for that long.
+
 net/http:
 
 ```go
