@@ -9,6 +9,8 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // ServiceGetter reads one Service. It is satisfied by
@@ -93,6 +95,20 @@ func lookupService(ctx context.Context, c clients, p parsedAddr, defaultNS strin
 		return nil, false, fmt.Errorf("kubedial: service %s/%s: %w", ns, p.Service, ErrUnsupportedService)
 	}
 
+	// A Service with a selector is resolved through its pods, which needs only
+	// list on pods and nothing else beyond the get on the Service above. A
+	// Service without one has its endpoints managed by hand, so its
+	// EndpointSlices are the only record of them.
+	if len(svc.Spec.Selector) > 0 {
+		refs, resolved, err := lookupServicePods(ctx, c, svc, p, ns)
+		if err != nil {
+			return nil, false, err
+		}
+		if resolved {
+			return endpointRefsToEndpoints(refs, ns), true, nil
+		}
+	}
+
 	slices, err := serviceSlices(ctx, c.EndpointSlices(ns), ns, p.Service)
 	if err != nil {
 		return nil, false, err
@@ -136,6 +152,16 @@ func lookupHeadlessPod(ctx context.Context, c clients, p parsedAddr, defaultNS s
 	if ns == "" {
 		ns = defaultNS
 	}
+	// A StatefulSet pod is named in its own address, so it is found directly,
+	// with the same list on pods the Service path uses and no EndpointSlices.
+	// A pod whose hostname differs from its name is only findable through the
+	// slice, so a miss falls through to it.
+	if ref, found, err := headlessPodByName(ctx, c, p, ns); err != nil {
+		return nil, false, err
+	} else if found {
+		return []Endpoint{{Namespace: ns, Pod: ref.pod, PodIP: ref.ip, Port: ref.port}}, true, nil
+	}
+
 	slices, err := serviceSlices(ctx, c.EndpointSlices(ns), ns, p.Service)
 	if err != nil {
 		return nil, false, err
@@ -325,6 +351,111 @@ func headlessEndpointRef(slices []discoveryv1.EndpointSlice, host string, port i
 		return *fallback, true
 	}
 	return endpointRef{}, false
+}
+
+// lookupServicePods resolves a Service that has a selector to its ready pods,
+// mapping the Service port onto each pod's own port. resolved is false only
+// when the pod list is forbidden, so the caller falls back to the Service's
+// EndpointSlices rather than refusing a client that was only ever granted
+// those: either read answers the question, and a client allowed neither gets
+// the EndpointSlice error.
+func lookupServicePods(ctx context.Context, c clients, svc *corev1.Service, p parsedAddr, ns string) (refs []endpointRef, resolved bool, err error) {
+	headless := svc.Spec.ClusterIP == corev1.ClusterIPNone
+	var svcPort *corev1.ServicePort
+	if !headless {
+		var found bool
+		svcPort, found = servicePortByNumber(svc, p.Port)
+		if !found {
+			return nil, false, fmt.Errorf("kubedial: service %s/%s has no port %d: %w", ns, p.Service, p.Port, ErrPortNotFound)
+		}
+	}
+
+	list, err := c.Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(svc.Spec.Selector).String()})
+	switch {
+	case apierrors.IsForbidden(err):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("kubedial: list pods for service %s/%s: %w", ns, p.Service, classifyAPIError(err))
+	}
+
+	ready := 0
+	refs = make([]endpointRef, 0, len(list.Items))
+	for i := range list.Items {
+		pod := &list.Items[i]
+		if !servingPod(pod) {
+			continue
+		}
+		ready++
+		port := p.Port
+		if !headless {
+			var ok bool
+			if port, ok = podTargetPort(svcPort, pod); !ok {
+				continue
+			}
+		}
+		refs = append(refs, endpointRef{pod: pod.Name, ip: pod.Status.PodIP, port: port})
+	}
+	if len(refs) == 0 {
+		if ready > 0 {
+			return nil, false, fmt.Errorf("kubedial: service %s/%s port %q has no endpoint port: %w", ns, p.Service, svcPort.Name, ErrPortNotFound)
+		}
+		return nil, false, fmt.Errorf("kubedial: service %s/%s: %w", ns, p.Service, ErrNoReadyEndpoint)
+	}
+	sortEndpointRefs(refs)
+	return refs, true, nil
+}
+
+// headlessPodByName finds the pod a headless-pod address names, by listing
+// the pods called host and keeping the one whose subdomain is the Service. found
+// is false for a miss and for a forbidden list, both of which leave the
+// EndpointSlices to answer.
+func headlessPodByName(ctx context.Context, c clients, p parsedAddr, ns string) (endpointRef, bool, error) {
+	list, err := c.Pods(ns).List(ctx, metav1.ListOptions{FieldSelector: "metadata.name=" + p.Host})
+	switch {
+	case apierrors.IsForbidden(err):
+		return endpointRef{}, false, nil
+	case err != nil:
+		return endpointRef{}, false, fmt.Errorf("kubedial: list pod %s in %s: %w", p.Host, ns, classifyAPIError(err))
+	}
+	for i := range list.Items {
+		pod := &list.Items[i]
+		if pod.Spec.Subdomain != p.Service || pod.Status.PodIP == "" {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		return endpointRef{pod: pod.Name, ip: pod.Status.PodIP, port: p.Port}, true, nil
+	}
+	return endpointRef{}, false, nil
+}
+
+// servingPod reports whether a Service's endpoint controller would publish the
+// pod: assigned an address, Ready, and not being deleted.
+func servingPod(pod *corev1.Pod) bool {
+	return pod.DeletionTimestamp == nil && pod.Status.PodIP != "" && podReady(pod)
+}
+
+// podTargetPort maps a Service port onto one pod, the way the EndpointSlice
+// controller does: a numeric targetPort as it stands (0 meaning the Service
+// port itself), a named one through the pod's own container ports. ok is false
+// for a pod that does not declare the name.
+func podTargetPort(svcPort *corev1.ServicePort, pod *corev1.Pod) (int32, bool) {
+	target := svcPort.TargetPort
+	if target.Type == intstr.Int {
+		if target.IntVal == 0 {
+			return svcPort.Port, true
+		}
+		return target.IntVal, true
+	}
+	for ci := range pod.Spec.Containers {
+		for pi := range pod.Spec.Containers[ci].Ports {
+			if port := &pod.Spec.Containers[ci].Ports[pi]; port.Name == target.StrVal {
+				return port.ContainerPort, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // bestPod picks the pod a forward should go to. activePodsLess puts the pod a

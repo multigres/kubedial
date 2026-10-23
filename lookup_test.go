@@ -25,6 +25,9 @@ type fakeClients struct {
 	cs             *fake.Clientset
 	forbid         map[string]bool
 	forbidServices bool
+	// forbidSlices makes every EndpointSlice list fail, so a test can prove a
+	// lookup resolved without them rather than merely that it resolved.
+	forbidSlices bool
 }
 
 func newFakeClients(objs ...runtime.Object) *fakeClients {
@@ -40,7 +43,7 @@ func (f *fakeClients) Pods(ns string) PodLister {
 }
 
 func (f *fakeClients) EndpointSlices(ns string) EndpointSliceLister {
-	return fakeSlices{cs: f.cs, ns: ns}
+	return fakeSlices{cs: f.cs, ns: ns, forbidden: f.forbidSlices}
 }
 
 type fakePods struct {
@@ -73,11 +76,15 @@ func (p fakePods) List(ctx context.Context, opts metav1.ListOptions) (*corev1.Po
 }
 
 type fakeSlices struct {
-	cs *fake.Clientset
-	ns string
+	cs        *fake.Clientset
+	ns        string
+	forbidden bool
 }
 
 func (s fakeSlices) List(ctx context.Context, opts metav1.ListOptions) (*discoveryv1.EndpointSliceList, error) {
+	if s.forbidden {
+		return nil, apierrors.NewForbidden(schema.GroupResource{Resource: "endpointslices"}, "", errors.New("forbidden"))
+	}
 	return s.cs.DiscoveryV1().EndpointSlices(s.ns).List(ctx, opts)
 }
 
@@ -92,7 +99,7 @@ func filterPodsByIP(list *corev1.PodList, selector string) (*corev1.PodList, err
 	out := &corev1.PodList{}
 	for i := range list.Items {
 		pod := &list.Items[i]
-		if sel.Matches(fields.Set{"status.podIP": pod.Status.PodIP}) {
+		if sel.Matches(fields.Set{"status.podIP": pod.Status.PodIP, "metadata.name": pod.Name}) {
 			out.Items = append(out.Items, *pod)
 		}
 	}

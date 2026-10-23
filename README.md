@@ -114,8 +114,8 @@ The cluster DNS domain is configurable with `WithClusterDomain`; the default is
 
 | Address form | Resolution |
 |---|---|
-| `svc`, `svc.ns`, `svc.ns.svc`, `svc.ns.svc.<domain>` | Service port to a ready endpoint, via EndpointSlices |
-| `pod.svc.ns.svc[.<domain>]` | Pod by hostname behind a headless Service (StatefulSet ordinals included) |
+| `svc`, `svc.ns`, `svc.ns.svc`, `svc.ns.svc.<domain>` | Service port to a ready pod: the Service's selector lists the pods, and the target port (numeric, or named through the pod's container ports) maps the Service port. A Service without a selector is resolved through its EndpointSlices |
+| `pod.svc.ns.svc[.<domain>]` | Pod by name behind a headless Service (StatefulSet ordinals included), matched on the Service's subdomain. A pod whose hostname differs from its name is found through the Service's EndpointSlices |
 | A pod IP literal | Pod by field selector `status.podIP` |
 | Anything else | Not in-cluster; dialled directly |
 
@@ -291,10 +291,18 @@ Forward mode needs:
 
 - `create` on `pods/portforward`
 - `get` on `services`
-- `list` on `endpointslices.discovery.k8s.io`
-- `list` on `pods`, cluster-wide for pod-IP addresses. Without the cluster-wide
-  list, pod-IP resolution falls back to the Dialer's namespace (`WithNamespace`,
-  else `default`), so a pod IP in another namespace will not resolve.
+- `list` on `pods`: in the Service's namespace for a Service with a selector or
+  a pod-name address, and cluster-wide for pod-IP addresses. Without the
+  cluster-wide list, pod-IP resolution falls back to the Dialer's namespace
+  (`WithNamespace`, else `default`), so a pod IP in another namespace will not
+  resolve.
+
+`list` on `endpointslices.discovery.k8s.io` is needed only for a Service with
+no selector, whose endpoints are managed by hand and so exist nowhere but the
+slice, and as the fallback for a client that was granted it but not `list` on
+pods in the Service's namespace. A pod-name address uses it only when the
+pod's hostname differs from its name. A client allowed both reads gets the
+answer from the pods.
 
 Direct mode needs none of this. In-cluster addresses never leave the cluster in
 that mode.
